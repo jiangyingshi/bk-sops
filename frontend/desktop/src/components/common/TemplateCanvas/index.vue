@@ -236,6 +236,8 @@
                 isSelectionOpen: false,
                 isShowHotKey: false,
                 isCanCreateline: false,
+                isLineDragging: false,
+                lineDraggingParams: {},
                 selectedNodes: [],
                 copyNodes: [],
                 selectionOriginPos: {
@@ -284,9 +286,20 @@
             canvasPaintArea.addEventListener('mousemove', this.onCanvasMouseMove, false)
             // 监听页面视图变化
             window.addEventListener('resize', this.onWindowResize, false)
+            // 连线分段拖拽
+            this.$refs.jsFlow.$el.addEventListener('mouseover', this.hoverLineHandler, true)
+            this.$refs.jsFlow.$el.addEventListener('mouseout', this.leaveLineHandler, true)
+            this.$refs.jsFlow.$el.addEventListener('mousedown', this.dragLineStartHandler, true)
+            this.$refs.jsFlow.$el.addEventListener('mousemove', this.moveLineHandler, true)
+            this.$refs.jsFlow.$el.addEventListener('mouseup', this.dragLineEndHandler, true)
         },
         beforeDestroy () {
+            this.$refs.jsFlow.$el.removeEventListener('mouseover', this.hoverLineHandler, true)
+            this.$refs.jsFlow.$el.removeEventListener('mouseout', this.leaveLineHandler, true)
             this.$refs.jsFlow.$el.removeEventListener('mousemove', this.pasteMousePosHandler)
+            this.$refs.jsFlow.$el.removeEventListener('mousedown', this.dragLineStartHandler, false)
+            this.$refs.jsFlow.$el.removeEventListener('mousemove', this.moveLineHandler, false)
+            this.$refs.jsFlow.$el.removeEventListener('mouseup', this.dragLineEndHandler, false)
             document.removeEventListener('keydown', this.nodeSelectedhandler)
             document.removeEventListener('keydown', this.nodeLineDeletehandler)
             document.body.removeEventListener('click', this.handleShortcutPanelHide, false)
@@ -370,9 +383,11 @@
                 document.removeEventListener('keydown', this.nodeSelectedhandler)
             },
             pasteMousePosHandler (e) {
-                this.pasteMousePos = {
-                    x: e.offsetX,
-                    y: e.offsetY
+                if (this.isSelectionOpen) {
+                    this.pasteMousePos = {
+                        x: e.offsetX,
+                        y: e.offsetY
+                    }
                 }
             },
             nodeSelectedhandler (e) {
@@ -483,6 +498,125 @@
                 if (this.editable) {
                     this.$emit('templateDataChanged')
                 }
+            },
+            hoverLineHandler (e) {
+                if (e.target.parentNode && e.target.parentNode.classList.contains('jtk-connector')) {
+                    e.stopPropagation()
+                    const svgWrap = e.target.parentNode.getBoundingClientRect()
+                    const d = e.target.getAttribute('d')
+                    const relPosX = e.pageX - svgWrap.left
+                    const relPosY = e.pageY - svgWrap.top
+                    const points = this.getMoveLinePoint(d, relPosX, relPosY)
+                    if (points.length > 0) {
+                        const prevPos = this.getPointPos(points[1])
+                        const nextPos = this.getPointPos(points[2])
+                        if (prevPos[0] === nextPos[0]) {
+                            e.target.parentNode.classList.add('horizon-drag')
+                        } else {
+                            e.target.parentNode.classList.add('vertical-drag')
+                        }
+                    }
+                }
+            },
+            leaveLineHandler (e) {
+                if (e.target.parentNode && e.target.parentNode.classList.contains('jtk-connector')) {
+                    e.stopPropagation()
+                    e.target.parentNode.classList.remove('vertical-drag')
+                    e.target.parentNode.classList.remove('horizon-drag')
+                }
+            },
+            getPointPos (point) {
+                if (/^L\s/.test(point)) {
+                    return point.replace(/^L/, '').trim().split(' ').map(item => Number(item))
+                }
+                if (/^A\s/.test(point)) {
+                    return point.match(/(\-)?\d+(\.\d{1,})?\s(\-)?\d+(\.\d{1,})?\s$/)[0].trim().split(' ').map(item => Number(item))
+                }
+            },
+            // 获取连线拖动片段的两个 point
+            getMoveLinePoint (d, x, y) {
+                let points = []
+                const delta = 8
+                const lineBreaks = d.match(/(^M\s(\-)?\d+(\.\d{1,})?\s(\-)?\d+(\.\d{1,})?\s)|(L\s(\-)?\d+(\.\d{1,})?\s(\-)?\d+(\.\d{1,})?\s)|(A\s((\-)?\d+(\.\d{1,})?\s){3}(\-)?\d+(\.\d{1,})?\,((\-)?\d+(\.\d{1,})?\s){3})/g)
+                if (lineBreaks) {
+                    // 去掉首尾端点
+                    lineBreaks.splice(0, 1)
+                    lineBreaks.splice(lineBreaks.length - 1, 1)
+    
+                    for (let i = 1; i < lineBreaks.length; i++) {
+                        const prevPoint = lineBreaks[i - 1]
+                        const nextPoint = lineBreaks[i]
+                        const prevPos = this.getPointPos(prevPoint)
+                        const nextPos = this.getPointPos(nextPoint)
+                        if (
+                            (prevPos[0] === nextPos[0] && nextPos[0] - delta <= x && nextPos[0] + delta >= x && ((prevPos[1] < y && nextPos[1] > y) || (prevPos[1] > y && nextPos[1] < y))) // 判断是否落在水平线段方向
+                            || (prevPos[1] === nextPos[1] && nextPos[1] - delta <= y && nextPos[1] + delta >= y && ((prevPos[0] < x && nextPos[0] > x) || (prevPos[0] > x && nextPos[0] < x))) // 判断是否落在垂直线段方向
+                        ) {
+                            if (/^A\s/.test(prevPoint) && /^L\s/.test(nextPoint) && lineBreaks[i + 1] && /^A\s/.test(lineBreaks[i + 1])) { // 被选中连线前后都有分段
+                                points = [lineBreaks[i - 2], prevPoint, nextPoint, lineBreaks[i + 1]]
+                            }
+                            break
+                        }
+                    }
+                }
+                return points
+            },
+            // 鼠标点击连线
+            dragLineStartHandler (e) {
+                if (e.target.parentNode && e.target.parentNode.classList.contains('jtk-connector')) {
+                    e.stopPropagation()
+                    // 计算出对应的连线拖动区间
+                    const svgWrap = e.target.parentNode.getBoundingClientRect()
+                    const d = e.target.getAttribute('d')
+                    const relPosX = e.pageX - svgWrap.left
+                    const relPosY = e.pageY - svgWrap.top
+                    const points = this.getMoveLinePoint(d, relPosX, relPosY)
+                    if (points.length > 0) {
+                        this.isLineDragging = true
+                        this.lineDraggingParams = {
+                            lineEl: e.target.parentNode,
+                            startX: e.pageX,
+                            startY: e.pageY,
+                            d,
+                            points
+                        }
+                    }
+                }
+            },
+            // 开始拖动连线某个部分，根据鼠标位置更新连线对应段的path路径
+            moveLineHandler (e) {
+                if (this.isLineDragging) {
+                    e.stopPropagation()
+                    const { lineEl, points, startX, startY, d } = this.lineDraggingParams
+                    const prevPos = this.getPointPos(points[1])
+                    const nextPos = this.getPointPos(points[2])
+                    const primPointsStr = points.join('')
+                    let newPointsStr = ''
+                    if (prevPos[0] === nextPos[0]) { // 水平方向拖动
+                        points.forEach(item => {
+                            const oldPos = this.getPointPos(item)
+                            const newPos = [oldPos[0] + e.pageX - startX, oldPos[1]]
+                            newPointsStr += item.replace(/(\-)?\d+(\.\d{1,})?\s(\-)?\d+(\.\d{1,})?\s$/, `${newPos[0]} ${newPos[1]} `)
+                        })
+                    } else { // 垂直方向拖动
+                        points.forEach(item => {
+                            const oldPos = this.getPointPos(item)
+                            const newPos = [oldPos[0], oldPos[1] + e.pageY - startY]
+                            newPointsStr += item.replace(/(\-)?\d+(\.\d{1,})?\s(\-)?\d+(\.\d{1,})?\s$/, `${newPos[0]} ${newPos[1]} `)
+                        })
+                    }
+                    const outlineSVG = lineEl.querySelector('.jtk-connector-outline')
+                    const lineSVG = outlineSVG.nextElementSibling
+                    const paths = [outlineSVG, lineSVG]
+                    paths.forEach(line => {
+                        line.setAttribute('d', d.replace(primPointsStr, newPointsStr))
+                    })
+                }
+            },
+            // 结束拖动
+            dragLineEndHandler () {
+                this.isLineDragging = false
+                this.lineDraggingParams = null
             },
             onToggleAllNode (val) {
                 this.$emit('onToggleAllNode', val)
@@ -1408,6 +1542,13 @@
         }
         .jtk-connector {
             z-index: 2;
+            overflow: visible;
+            &.vertical-drag {
+                cursor: ns-resize;
+            }
+            &.horizon-drag {
+                cursor: ew-resize;
+            }
         }
         .jtk-overlay {
             cursor: pointer;
